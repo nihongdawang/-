@@ -1,0 +1,29 @@
+import requests
+import pandas as pd
+from concurrent.futures import ThreadPoolExecutor
+
+def get_one_page(url , i):
+    headers = {
+        "user-agent" : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+        "referer": "http://www.xinfadi.com.cn/priceDetail.html"
+    }
+    payload = {
+        "limit": 20,
+        "current": i,
+        "pubDateStartTime": "2026/07/25",
+        "pubDateEndTime": "",
+        "prodPcatid": "",
+        "prodCatid": "",
+        "prodName": ""
+    }
+    resp = requests.post(url=url , data=payload , headers=headers)
+    print(resp.text)
+    df = pd.DataFrame(resp.json()["list"] , columns=['prodName',  'prodCat', 'lowPrice', 'highPrice', 'place', 'unitInfo', 'pubDate'])
+    df.to_csv("新发地菜价.csv" , encoding='utf-8')
+    print(f"提取页面{i}成功")
+
+
+if __name__ == '__main__':
+    with ThreadPoolExecutor(5) as t:
+        for i in range(1,300):
+            t.submit(get_one_page , "http://www.xinfadi.com.cn/getPriceData.html" , i)
