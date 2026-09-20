@@ -1,12 +1,27 @@
 import requests
 import pandas as pd
-from concurrent.futures import ThreadPoolExecutor
+import time
+import matplotlib.pyplot as plt
+from concurrent.futures import ThreadPoolExecutor, as_completed
+from threading import Lock
 
-def get_one_page(url , i):
-    headers = {
-        "user-agent" : "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-        "referer": "http://www.xinfadi.com.cn/priceDetail.html"
-    }
+plt.rcParams['font.sans-serif'] = ['SimHei']
+plt.rcParams['axes.unicode_minus'] = False
+
+results = []
+lock = Lock()
+
+session = requests.Session()
+session.headers.update({
+    "user-agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                  "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
+    "referer": "http://www.xinfadi.com.cn/priceDetail.html"
+})
+
+URL = "http://www.xinfadi.com.cn/getPriceData.html"
+
+
+def get_one_page(i, retry=3):
     payload = {
         "limit": 20,
         "current": i,
@@ -16,14 +31,118 @@ def get_one_page(url , i):
         "prodCatid": "",
         "prodName": ""
     }
-    resp = requests.post(url=url , data=payload , headers=headers)
-    print(resp.text)
-    df = pd.DataFrame(resp.json()["list"] , columns=['prodName',  'prodCat', 'lowPrice', 'highPrice', 'place', 'unitInfo', 'pubDate'])
-    df.to_csv("新发地菜价.csv" , encoding='utf-8')
-    print(f"提取页面{i}成功")
+    for attempt in range(retry):
+        try:
+            resp = session.post(url=URL, data=payload, timeout=10)
+            resp.raise_for_status()
+            data_list = resp.json().get("list", [])
+            if not data_list:
+                print(f"页面 {i} 无数据")
+                return
+            with lock:
+                results.extend(data_list)
+            print(f"页面 {i} 采集成功，共 {len(data_list)} 条")
+            return
+        except Exception as e:
+            print(f"页面 {i} 第 {attempt + 1} 次失败：{e}")
+            time.sleep(1)
+    print(f"页面 {i} 重试 {retry} 次后仍失败")
+
+
+def crawl():
+    max_page = 300
+    with ThreadPoolExecutor(5) as t:
+        futures = [t.submit(get_one_page, i) for i in range(1, max_page + 1)]
+        for f in as_completed(futures):
+            pass
+
+    df = pd.DataFrame(results, columns=[
+        'prodName', 'prodCat', 'lowPrice', 'highPrice',
+        'place', 'unitInfo', 'pubDate'
+    ])
+    df.drop_duplicates(inplace=True)
+    df.to_csv("新发地菜价.csv", index=False, encoding='utf-8-sig')
+    print(f"采集完成，共 {len(df)} 条数据，已保存至 新发地菜价.csv")
+    return df
+
+
+def clean_data(df):
+    df = df.copy()
+    # 价格转数值
+    df['lowPrice'] = pd.to_numeric(df['lowPrice'], errors='coerce')
+    df['highPrice'] = pd.to_numeric(df['highPrice'], errors='coerce')
+    # 计算均价
+    df['avgPrice'] = (df['lowPrice'] + df['highPrice']) / 2
+    # 过滤无效价格
+    df = df.dropna(subset=['avgPrice'])
+    df = df[df['avgPrice'] > 0]
+    # 日期格式化
+    df['pubDate'] = pd.to_datetime(df['pubDate'], errors='coerce')
+    print(f"清洗后剩余 {len(df)} 条有效数据")
+    return df
+
+def analyze_and_plot(df):
+    # 图1：菜价 Top 10 均价（条形图）
+    top10 = df.groupby('prodName')['avgPrice'].mean().nlargest(10)
+    plt.figure(figsize=(10, 5))
+    top10.plot(kind='barh', color='#4C9F70')
+    plt.title('新发地菜价 Top 10 均价排行')
+    plt.xlabel('均价（元）')
+    plt.ylabel('菜品')
+    plt.gca().invert_yaxis()
+    plt.tight_layout()
+    plt.savefig('top10_avg_price.png', dpi=120)
+    plt.close()
+
+    # 图2：各品类平均价格（饼图）
+    cat_avg = df.groupby('prodCat')['avgPrice'].mean().head(8)
+    plt.figure(figsize=(8, 8))
+    cat_avg.plot(kind='pie', autopct='%1.1f%%', startangle=90,
+                 colors=plt.cm.Pastel1.colors)
+    plt.title('各品类平均价格占比')
+    plt.ylabel('')
+    plt.tight_layout()
+    plt.savefig('category_avg_pie.png', dpi=120)
+    plt.close()
+
+    # 图3：价格区间分布（直方图）
+    plt.figure(figsize=(10, 5))
+    plt.hist(df['avgPrice'], bins=30, color='#E07A5F', edgecolor='white')
+    plt.title('菜价区间分布直方图')
+    plt.xlabel('均价（元）')
+    plt.ylabel('数量')
+    plt.tight_layout()
+    plt.savefig('price_distribution.png', dpi=120)
+    plt.close()
+
+    # 图4：产地 Top 5 平均价格（折线/柱状）
+    place_avg = df.groupby('place')['avgPrice'].mean().nlargest(5)
+    plt.figure(figsize=(8, 5))
+    place_avg.plot(kind='bar', color='#3D5A80')
+    plt.title('产地 Top 5 平均菜价')
+    plt.xlabel('产地')
+    plt.ylabel('均价（元）')
+    plt.tight_layout()
+    plt.savefig('place_avg_price.png', dpi=120)
+    plt.close()
+
+    print("\n========== 数据分析报告 ==========")
+    print(f"总记录数：{len(df)}")
+    print(f"涉及菜品数：{df['prodName'].nunique()}")
+    print(f"涉及产地数：{df['place'].nunique()}")
+    print(f"整体均价：{df['avgPrice'].mean():.2f} 元")
+    print(f"最贵菜品：\n{top10.head(1)}")
+    print("==================================")
+    print("图表已保存：top10_avg_price.png / category_avg_pie.png / "
+          "price_distribution.png / place_avg_price.png")
 
 
 if __name__ == '__main__':
-    with ThreadPoolExecutor(5) as t:
-        for i in range(1,300):
-            t.submit(get_one_page , "http://www.xinfadi.com.cn/getPriceData.html" , i)
+    raw_df = crawl()
+    clean_df = clean_data(raw_df)
+    analyze_and_plot(clean_df)
+
+    #如果 CSV 已有，直接读入分析
+    # df = pd.read_csv("新发地菜价.csv")
+    # clean_df = clean_data(df)
+    # analyze_and_plot(clean_df)
